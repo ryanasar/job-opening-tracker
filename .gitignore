@@ -1,0 +1,24 @@
+# dependencies
+node_modules/
+
+# wrangler / build output
+.wrangler/
+dist/
+
+# local secrets -- never commit. keep the .example template committed.
+.dev.vars*
+!.dev.vars.example
+
+# OS
+.DS_Store
+
+# --- private targeting data: do NOT publish ---
+# Which ATS + host/slug/tenant each company uses = the actual per-company
+# query URLs. Kept out of the public repo. Regenerate locally with:
+#   npm run sync   (and  npm run sync:mech)
+src/registry.js
+src/registry.mech.js
+src/overrides.js
+src/overrides.mech.js
+docs/UNRESOLVED.md
+docs/UNRESOLVED.mech.md

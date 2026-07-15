@@ -1,0 +1,24 @@
+name = "jobwatch"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# Workers Paid ($5/mo). This is load-bearing: the free tier caps CPU at 10ms per
+# invocation, which is ~3 JSON boards. Paid raises it to 30s, which is why we can
+# poll all 43 companies on every tick instead of sharding across 5.
+[limits]
+cpu_ms = 30000
+
+# Public Worker URL. Not a secret -- used to build the "✅ Log as applied" link
+# in Telegram alerts. If you add a custom domain later, update this.
+[vars]
+BASE_URL = "https://jobwatch.ryanasar05.workers.dev"
+
+[triggers]
+crons = [
+  "*/5 * * * *",  # every company, every 5 min. Was "* * * * *" + 5-way sharding.
+  "0 13 * * *",   # daily digest backstop (8am Central)
+]
+
+[[kv_namespaces]]
+binding = "JOBS"
+id = "5a1c13319ef440deb3d65805e71a283b"

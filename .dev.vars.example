@@ -1,0 +1,21 @@
+# Copy to .dev.vars and fill in. Used ONLY by `wrangler dev` (local).
+# .dev.vars is gitignored. Never commit real values, and never put these in
+# wrangler.toml -- that file IS committed.
+#
+# Production does not read this file. Deployed secrets go in with:
+#   npx wrangler secret put TG_TOKEN      (etc, one per line below)
+
+# @BotFather -> /newbot -> it hands you this
+TG_TOKEN=123456789:AAExampleExampleExampleExampleExample
+
+# Message your new bot once, then:
+#   curl "https://api.telegram.org/bot$TG_TOKEN/getUpdates"
+# and read result[0].message.chat.id
+TG_CHAT_ID=123456789
+
+# console.anthropic.com -> API keys
+ANTHROPIC_KEY=sk-ant-...
+
+# You invent this. It gates /health, /test, /dashboard and the tracker API.
+#   openssl rand -hex 24
+ADMIN_KEY=replace-me

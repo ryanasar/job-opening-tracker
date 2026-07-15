@@ -1,0 +1,31 @@
+# The MECHANICAL Worker. Second Worker, same account, same $5 Workers Paid plan
+# (the subscription is per-account, not per-Worker). Deploy with:
+#   npx wrangler deploy --config wrangler.mech.toml
+#
+# Everything is separate from the software Worker: its own KV namespace, its own
+# Telegram chat, its own ADMIN_KEY. Nothing is shared but the code.
+
+name = "jobwatch-mech"
+main = "src/index.mech.js"
+compatibility_date = "2026-01-01"
+
+# Workers Paid, same as the software Worker. Load-bearing: the free tier caps CPU
+# at 10ms; polling 36+ boards needs the 30s ceiling.
+[limits]
+cpu_ms = 30000
+
+[vars]
+BASE_URL = "https://jobwatch-mech.ryanasar05.workers.dev"
+
+[triggers]
+crons = [
+  "*/5 * * * *",  # every board, every 5 min
+  "0 13 * * *",   # daily digest backstop (8am Central)
+]
+
+# SEPARATE namespace from the software Worker -- his seen-sets, applications and
+# verdicts never touch yours. Create it and paste the id here:
+#   npx wrangler kv namespace create JOBS --config wrangler.mech.toml
+[[kv_namespaces]]
+binding = "JOBS"
+id = "04ce143846f34aca9653d848cc31a625"

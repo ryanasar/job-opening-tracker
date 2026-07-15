@@ -1,0 +1,209 @@
+#!/usr/bin/env node
+// Usage: node scripts/sync.mjs
+//
+// companies.txt is the source of truth. This reads it, works out which ATS each
+// company is on, and writes two files:
+//
+//   src/registry.js   -- GENERATED. What the worker actually polls.
+//   docs/UNRESOLVED.md -- the companies it couldn't crack, for a manual DevTools pass.
+//
+// Adding a company = add a line to companies.txt, run this. Nothing else.
+// Anything it can't resolve still gets caught by the aggregator, ~30 min behind.
+
+import { readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+// Optional profile arg: `node scripts/sync.mjs mech` builds the mechanical
+// tracker's files (companies-mech.txt -> src/registry.mech.js +
+// docs/UNRESOLVED.mech.md) without touching the software ones. No arg = the
+// software profile, unchanged.
+const PROFILE = (process.argv[2] || "").replace(/[^a-z0-9]/gi, "");
+const suffix = PROFILE ? `.${PROFILE}` : "";
+const companiesFile = PROFILE ? `companies-${PROFILE}.txt` : "companies.txt";
+const registryFile = `registry${suffix}.js`;
+const unresolvedFile = `UNRESOLVED${suffix}.md`;
+const FIELD = PROFILE === "mech" ? "mechanical engineer" : "software engineer";
+
+// Overrides are per-profile and hand-maintained; a profile with none just gets
+// empty maps.
+const { OVERRIDES, KNOWN_DEAD } = await import(`../src/overrides${suffix}.js`);
+
+// A board returning 1-2 jobs is a name collision on some other company's tenant,
+// not our board. Treat a thin result as unresolved rather than silently tracking
+// the wrong company forever.
+const MIN_JOBS = 5;
+const CONCURRENCY = 6;
+
+const ATS = [
+  ["greenhouse", (s) => `https://boards-api.greenhouse.io/v1/boards/${s}/jobs`, (d) => d.jobs?.length ?? 0],
+  ["lever", (s) => `https://api.lever.co/v0/postings/${s}?mode=json`, (d) => (Array.isArray(d) ? d.length : 0)],
+  ["ashby", (s) => `https://api.ashbyhq.com/posting-api/job-board/${s}`, (d) => d.jobs?.length ?? 0],
+  ["smartrecruiters", (s) => `https://api.smartrecruiters.com/v1/companies/${s}/postings?limit=100`, (d) => d.totalFound ?? 0],
+];
+
+// Wiz lives at "wizinc", not "wiz". Boards are named by whoever signed up, so
+// try the obvious permutations before giving up.
+function slugs(name) {
+  const paren = name.match(/\(([^)]+)\)/)?.[1];
+  const clean = name.replace(/\([^)]*\)/g, "").trim();
+  const words = clean.toLowerCase().split(/[\s.,'&/-]+/).filter(Boolean);
+  const noThe = words[0] === "the" ? words.slice(1) : words;
+  const base = words.join("");
+
+  const out = [
+    base,
+    `${base}inc`,
+    noThe.join(""),
+    words.join("-"),
+    words.length > 1 ? words[0] : null,
+    paren ? paren.toLowerCase().replace(/[^a-z0-9]/g, "") : null,
+  ];
+  return [...new Set(out.filter((s) => s && s.length > 1))];
+}
+
+async function tryOne(adapter, url, count, slug) {
+  try {
+    const r = await fetch(url(slug), {
+      headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!r.ok) return 0;
+    return count(await r.json()) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function resolve(name) {
+  if (OVERRIDES[name]) return { name, entry: OVERRIDES[name], how: "override" };
+  if (KNOWN_DEAD[name]) return { name, dead: KNOWN_DEAD[name] };
+
+  const thin = [];
+  for (const slug of slugs(name)) {
+    for (const [adapter, url, count] of ATS) {
+      const n = await tryOne(adapter, url, count, slug);
+      if (n >= MIN_JOBS) return { name, entry: { adapter, slug }, jobs: n, how: "auto" };
+      if (n > 0) thin.push(`${adapter}/${slug} (only ${n} job${n === 1 ? "" : "s"})`);
+    }
+  }
+  return { name, thin };
+}
+
+async function pool(items, n, fn) {
+  const out = [];
+  let i = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(n, items.length) }, async () => {
+      while (i < items.length) {
+        const idx = i++;
+        out[idx] = await fn(items[idx]);
+        process.stderr.write(".");
+      }
+    }),
+  );
+  return out;
+}
+
+// --- read companies.txt: drop the header, dedupe, keep the user's order ---
+const names = [
+  ...new Set(
+    readFileSync(join(ROOT, companiesFile), "utf8")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l && l.toLowerCase() !== "company"),
+  ),
+];
+
+process.stderr.write(`probing ${names.length} companies`);
+const results = await pool(names, CONCURRENCY, resolve);
+process.stderr.write("\n\n");
+
+const resolved = results.filter((r) => r.entry);
+const dead = results.filter((r) => r.dead);
+const unknown = results.filter((r) => !r.entry && !r.dead);
+
+// --- registry.js ---
+const lines = resolved.map(
+  (r) => `  ${JSON.stringify(r.name)}: ${JSON.stringify(r.entry)},`,
+);
+writeFileSync(
+  join(ROOT, "src", registryFile),
+  `// GENERATED by scripts/sync.mjs${PROFILE ? ` ${PROFILE}` : ""} -- do not edit by hand.
+// Source of truth is ${companiesFile}; hand-tuned entries live in overrides${suffix}.js.
+// Add a company there, then: node scripts/sync.mjs${PROFILE ? ` ${PROFILE}` : ""} && node scripts/probe.mjs${PROFILE ? ` ${PROFILE}` : ""}
+//
+// ${resolved.length} resolved / ${names.length} listed. The rest are in ${unresolvedFile}.
+
+export const REGISTRY = {
+${lines.join("\n")}
+};
+`,
+);
+
+// --- UNRESOLVED.md: the manual-check worklist ---
+const search = (n) =>
+  `https://www.google.com/search?q=${encodeURIComponent(`${n} careers ${FIELD} new grad`)}`;
+
+const md = `# Unresolved companies
+
+Generated by \`node scripts/sync.mjs\`. **Do not edit** -- it is overwritten on every run.
+
+${resolved.length} of ${names.length} companies in \`companies.txt\` resolve to a pollable
+endpoint. The ${dead.length + unknown.length} below do not. They are **not invisible**: the
+SimplifyJobs aggregator still surfaces them, roughly 30 minutes behind. Cracking one
+only buys you latency.
+
+To fix one: open its careers page, DevTools > Network > XHR, find the fat JSON
+response, and add an entry to \`OVERRIDES\` in \`overrides.js\` (see \`capture.md\`).
+Then re-run sync. Budget ~15 min each; do the ones you actually care about.
+
+---
+
+## Needs a manual capture (${unknown.length})
+
+No public ATS responded for any slug we tried.
+
+| Company | Slugs tried | Look it up |
+|---|---|---|
+${unknown
+  .map((r) => `| ${r.name} | \`${slugs(r.name).join("`, `")}\` | [search](${search(r.name)}) |`)
+  .join("\n")}
+
+${
+  unknown.some((r) => r.thin?.length)
+    ? `### Near-misses worth a look
+
+These *did* answer, but with too few jobs to be the real board (under ${MIN_JOBS}) -- almost
+certainly a name collision with someone else's tenant, so we did not wire them up.
+
+${unknown
+  .filter((r) => r.thin?.length)
+  .map((r) => `- **${r.name}** — ${r.thin.join("; ")}`)
+  .join("\n")}
+`
+    : ""
+}
+---
+
+## Known dead (${dead.length})
+
+Already probed and diagnosed. Sync skips these instead of re-probing them every run.
+Reasons live in \`KNOWN_DEAD\` in \`overrides.js\`.
+
+| Company | Why |
+|---|---|
+${dead.map((r) => `| ${r.name} | ${r.dead} |`).join("\n")}
+`;
+
+writeFileSync(join(ROOT, "docs", unresolvedFile), md);
+
+// --- console summary ---
+const auto = resolved.filter((r) => r.how === "auto");
+console.log(`resolved   ${resolved.length}/${names.length}  (${auto.length} auto-discovered, ${resolved.length - auto.length} from overrides.js)`);
+console.log(`unresolved ${unknown.length}  -> docs/${unresolvedFile}`);
+console.log(`known dead ${dead.length}  -> docs/${unresolvedFile}`);
+console.log(`\nwrote src/${registryFile} + docs/${unresolvedFile}`);
+console.log(`next: node scripts/probe.mjs`);

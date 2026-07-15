@@ -1,0 +1,90 @@
+Company
+Meta
+Apple
+Amazon
+Uber
+Netflix
+Doordash
+Pinterest
+Google
+Microsoft
+ByteDance
+Qualcomm
+Oracle
+Adobe
+Slack
+Salesforce
+Adobe
+Tesla
+Stripe
+Dell
+SeatGeek
+Intuit
+Microsoft
+Wells Fargo
+JP Morgan
+Ramp
+Cloudflare
+Q2
+Capital One
+StubHub
+Coinbase
+Robinhood
+Anduril
+Bloomberg
+Visa
+IBM
+Datadog
+Snowflake
+Confluent
+MongoDB
+Elastic
+HashiCorp
+DigitalOcean
+Fastly
+Akamai
+New Relic
+Brex
+Plaid
+Block (Square)
+SoFi
+Chime
+Affirm
+Twilio
+Dropbox
+Box
+Zoom
+Atlassian
+HubSpot
+Shopify
+Zillow
+Expedia
+Palantir
+OpenAI
+Anthropic
+Scale AI
+Retool
+Jane Street
+Hudson River Trading
+Citadel
+Two Sigma
+DRW
+Lockheed Martin
+Northrop Grumman
+Raytheon
+Notion
+Figma
+Vercel
+Supabase
+Render
+DraftKings
+Chewy
+GrubHub
+Coursera
+Duolingo
+The Trade Desk
+Spotify
+Wiz
+CrowdStrike
+Lyft
+Snap
