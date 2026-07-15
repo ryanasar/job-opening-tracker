@@ -1,87 +1,137 @@
 # jobwatch
 
-Polls each company's own careers portal directly, diffs against KV, pushes a
-Telegram alert within ~5 minutes of a new-grad role going live.
-Cloudflare Workers free tier. Cost: ~$0.
+A Cloudflare Worker that checks company careers pages every 5 minutes and sends me
+a Telegram message when a new-grad or off-season internship role shows up. It hits
+each company's real portal, diffs against what it saw last time, and pings me
+within a few minutes of a req going live. Summer internships are skipped on purpose
+— I graduate in 2027, so they don't do me any good.
 
-## The two hard parts
+I built it because I got tired of refreshing job boards and still finding out about
+roles a day late, after they'd already gotten a few hundred applicants.
 
-**1. Every portal is different.** So every company gets an *adapter*, in three tiers:
+There are actually two copies running off the same code: one for my software search
+and one a friend uses for mechanical/aerospace roles. They share all the engine code
+and only differ in a small profile (`{ COMPANIES, classify, track }`) plus a
+watchlist file. So most files have a plain version and a `.mech` version.
 
-- **Tier 1 — public ATS JSON** (Greenhouse, Lever, Ashby, SmartRecruiters, Workday).
-  Worth being clear: `boards-api.greenhouse.io/v1/boards/stripe/jobs` is not an
-  aggregator. Greenhouse is an ATS, not a job board. Stripe's careers page renders
-  from that exact endpoint. Hitting it *is* hitting Stripe's portal — minus the
-  HTML. If anything you're slightly ahead of the public page, since a req is live
-  in the ATS before anyone links it.
-- **Tier 2 — custom portals** (Amazon, Apple, Microsoft, Google, Meta). No public
-  API, but their own frontends call JSON endpoints you can call too. Undocumented,
-  so they drift. See `docs/capture.md`.
-- **Tier 3 — `html`** — diff job links out of raw HTML. Crude, always works.
+## Heads up if you're cloning this
 
-**2. Every company names the job differently.** "SDE I" / "Technology Development
-Program" / "Engineer, University Grad" / "Early Career SWE" / plain "Software
-Engineer" with the class year buried in the body. Regex will never cover this.
+The files that map each company to its specific job board endpoint aren't in the
+repo — `src/registry.js`, `src/overrides.js`, and their `.mech` counterparts are
+gitignored, along with the generated `docs/UNRESOLVED*.md`. I didn't want to publish
+my exact target list. Everything else (the engine, the adapters, the classifier) is
+here.
 
-So `classify.js` does: obvious-NO regex → obvious-YES regex → **LLM call for
-anything ambiguous**, with the verdict cached in KV **per unique title string,
-forever**. Companies repost the same titles endlessly, so after week one this
-barely fires. A few hundred Haiku calls across the whole season. Pennies.
+To get it running you regenerate the registry from your own `companies.txt`:
+
+```bash
+npm run sync         # auto-detects each company's ATS -> writes src/registry.js
+npm run sync:mech    # same for the mechanical list
+```
+
+Anything sync can't figure out lands in `docs/UNRESOLVED.md`, and you wire it up by
+hand in `src/overrides.js` (mostly Workday hosts and the custom portals).
+
+## The two annoying problems
+
+**Every portal is different.** So each company gets an adapter, and they fall into
+three tiers:
+
+- Public ATS JSON — Greenhouse, Lever, Ashby, SmartRecruiters, Workday. One thing
+  worth saying out loud: `boards-api.greenhouse.io/v1/boards/stripe/jobs` isn't some
+  scraper or aggregator. Greenhouse is the ATS. Stripe's own careers page renders
+  from that exact endpoint, so hitting it is hitting Stripe's portal, just without
+  the HTML around it. You're often slightly ahead of the public page, since a req is
+  live in the ATS before it gets linked anywhere.
+- Custom portals — Amazon, Apple, Microsoft, Google, Meta. No public API, but their
+  frontends call JSON endpoints that you can call too. They're undocumented so they
+  drift every few months; `docs/capture.md` has my process for re-capturing one when
+  it breaks.
+- `html` fallback — pull job links straight out of the raw HTML with a regex. Ugly,
+  but it works on anything.
+
+On top of the per-company adapters there's a SimplifyJobs aggregator running as a
+catch-all, so a new-grad role at a company I never added still has a chance of
+getting caught. (The mechanical copy deliberately runs without it — there's no good
+aggregator for those roles, so its watchlist has to carry the whole load.)
+
+**Every company names the same job differently.** "SDE I", "Technology Development
+Program", "Engineer, University Grad", "Early Career SWE", or just "Software
+Engineer" with the class year buried in the description. No regex covers all of that.
+
+So the classifier does the cheap checks first — an obvious-no regex, then a new-grad
+allowlist (the title has to actually say entry-level: new grad, junior, 2027, SWE I,
+associate, and so on). The only titles that reach an LLM call are the genuinely
+ambiguous ones, mostly internships with no season attached, where it reads the
+posting to decide. Verdicts get cached in KV per title string and basically never
+expire, because companies repost the same titles constantly. After the first week
+it barely calls the API — a few hundred Claude Haiku 4.5 calls across a whole
+recruiting season. There's also a US-only location filter that runs before the
+classifier, so confidently-foreign roles get dropped before they cost anything, and
+a daily digest that backstops the whole thing in case a verdict was wrong.
 
 ## Setup
 
 ```bash
 npm i -g wrangler && wrangler login
 
+# figure out which ATS each company uses, then add them to companies.txt
 node scripts/discover.mjs cloudflare datadog stripe ramp atlassian wiz vercel
-# -> tells you which ATS each uses; add the company to companies.txt, then npm run sync
-# -> for Amazon/Apple/Microsoft/etc, follow docs/capture.md
+npm run sync
 
-wrangler kv namespace create JOBS       # paste id into wrangler.toml
+wrangler kv namespace create JOBS       # paste the id into wrangler.toml
 
-wrangler secret put TG_TOKEN            # @BotFather -> /newbot
+wrangler secret put TG_TOKEN            # from @BotFather -> /newbot
 wrangler secret put TG_CHAT_ID          # api.telegram.org/bot<TOKEN>/getUpdates
 wrangler secret put ANTHROPIC_KEY       # for the title classifier
-wrangler secret put ADMIN_KEY           # any random string
+wrangler secret put ADMIN_KEY           # any random string, gates the admin routes
 
 wrangler deploy
-curl "https://jobwatch.<you>.workers.dev/test?key=$ADMIN_KEY"     # verify push
+curl "https://jobwatch.<you>.workers.dev/test?key=$ADMIN_KEY"     # send a test alert
 curl "https://jobwatch.<you>.workers.dev/health?key=$ADMIN_KEY"   # adapter status
 ```
 
-First poll per company **seeds silently** — records what's already open without
-alerting. Alerts start on poll two.
+The first time it polls a company it seeds quietly: it records what's already open
+without alerting on any of it. Real alerts start on the second poll.
 
-## Silent breakage is the real enemy
+## Catching silent breakage
 
-An undocumented endpoint changing is fine. An undocumented endpoint changing and
-you not noticing for three weeks while you assume Amazon hasn't posted yet is
-not fine.
+The thing I actually worry about isn't an endpoint changing — it's an endpoint
+changing and me not noticing for three weeks while I assume that company just hasn't
+posted anything.
 
-So: an exception *or* a zero-jobs response counts as a failure, consecutive
-failures are tracked in KV, and you get a Telegram warning after 6 in a row
-(~30 min). `/health` shows current state. Budget ~15 min every couple months to
-re-capture whichever adapter rotted.
+So a thrown error or a zero-jobs response both count as failures. The Worker tracks
+consecutive failures per adapter in KV and sends me a warning after six in a row
+(about 30 minutes). `/health` shows the current state of every adapter. In practice
+I spend maybe 15 minutes every couple of months re-capturing whichever custom portal
+rotted.
 
-## Why Workers and not GitHub Actions
+## Why a Worker and not GitHub Actions
 
-GH Actions scheduled workflows are best-effort queued and routinely fire 10-40
-minutes late. Workers cron has a 1-minute minimum and actually fires on time.
+Scheduled GitHub Actions are best-effort — they get queued and routinely fire 10 to
+40 minutes late, which defeats the whole point of catching a posting early. Workers
+cron has a 1-minute minimum and actually runs on time.
 
-The constraint is 10ms CPU per invocation on the free plan. Hence sharding:
-cron runs every minute, each tick handles `i % 5 === shard`, so every company is
-polled every 5 minutes while each tick only parses 2-3 boards. Network waiting
-(fetch, KV, LLM) does not count against CPU time, so the classifier is free here.
+I'm on the $5/month Workers Paid plan. The free tier caps you at 10ms of CPU per
+invocation, which is only enough to parse a couple of boards per run, so on free
+you'd have to shard the work across ticks. Paid raises the limit to 30 seconds, so
+every company gets polled on every 5-minute tick with no sharding. The one cap I do
+keep is polling six companies at a time, and that's just being polite to the ATS
+endpoints, not a CPU thing.
 
-If the 10ms budget gets tight, $5/mo Workers Paid raises it to 30s and you can
-drop the sharding.
+## Cost
 
-## Budget
+Runs about $5.40/month all in, and it's mostly just the $5 base plan. My software
+list currently resolves to about 70 companies, all polled every 5 minutes:
 
-| | | |
+| | usage | included on the $5 plan |
 |---|---|---|
-| Worker invocations | 1,440/day | limit 100,000 |
-| KV reads | ~5,000/day | limit 100,000 |
-| KV writes | only on change | limit 1,000 |
-| Cron triggers | 1 | limit 5 |
-| Anthropic | a few hundred Haiku calls, total | ~$0 |
+| Worker invocations | ~8,600/month (288/day, 5-min cron) | 10M/month |
+| KV reads | ~1.5M/month | 10M/month |
+| KV writes | a few thousand/month (only on real changes) | 1M/month |
+| Cron triggers | 2 (the 5-min poll + a daily digest) | — |
+| Anthropic | a few hundred Claude Haiku 4.5 calls total | cents |
+
+There's 5–10x headroom on everything, so the same $5 would cover a few hundred
+companies before anything gets tight. `npm run budget` re-checks this against the
+live boards whenever the list grows.
