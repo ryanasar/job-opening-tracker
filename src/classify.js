@@ -108,10 +108,86 @@ export function track(title) {
 const US_SIGNAL =
   /\bunited states\b|\bUSA\b|\bU\.S\.A?\.?\b|,\s*(A[LKZR]|C[AOT]|DE|FL|GA|HI|I[ADLN]|K[SY]|LA|M[ADEINOST]|N[CDEHJMVY]|O[HKR]|PA|RI|S[CD]|TN|TX|UT|V[AT]|W[AIVY]|DC)\b/i;
 
-// Confident non-US: a foreign country or major foreign city these adapters
-// actually return. This is a BLOCKLIST -- only used to drop, never to keep.
-const NON_US =
-  /\b(canada|toronto|vancouver|montreal|ottawa|ontario|quebec|united kingdom|england|scotland|\bu\.?k\.?\b|london|manchester|edinburgh|glenrothes|fife|ireland|dublin|germany|berlin|munich|france|paris|netherlands|amsterdam|poland|warsaw|krakow|romania|bucharest|spain|madrid|barcelona|portugal|lisbon|italy|milan|sweden|stockholm|switzerland|zurich|geneva|india|bengaluru|bangalore|hyderabad|pune|mumbai|gurugram|gurgaon|noida|chennai|delhi|kolkata|singapore|china|beijing|shanghai|shenzhen|hong kong|japan|tokyo|korea|seoul|australia|sydney|melbourne|brazil|sao paulo|mexico|israel|tel aviv|philippines|manila|cebu|taiwan|taipei|vietnam|hanoi|indonesia|jakarta|thailand|bangkok|malaysia|kuala lumpur|egypt|cairo|\buae\b|dubai|abu dhabi|south africa|argentina|colombia|bogota|chile|costa rica|new zealand|auckland|austria|vienna|belgium|brussels|denmark|copenhagen|finland|helsinki|norway|oslo|greece|athens|czechia|prague|hungary|budapest|turkey|istanbul|luxembourg)\b/i;
+// Confident non-US: a foreign country or a major foreign city these boards
+// actually return. A BLOCKLIST -- only ever used to drop, never to keep, and
+// checked AFTER US_SIGNAL so a "City, XX" role with a US state always wins.
+//
+// RULE for adding a name: it must be UNAMBIGUOUSLY foreign. Do NOT add a city
+// that is also a US city when it appears without its state -- Cambridge (MA),
+// Rome (GA), Birmingham (AL), Bristol (TN), Naples (FL), Waterloo (IA). Dropping
+// a real US role is the one thing this gate must never do. When in doubt add the
+// COUNTRY and leave the city out: "Stuttgart, Germany" is already caught by
+// "germany", and "Cambridge, UK" by "u.k." -- the city name is only needed for a
+// bare "City" with no country, which is exactly the ambiguous case to avoid.
+const NON_US = new RegExp(
+  "\\b(" +
+    [
+      // North America (non-US)
+      "canada", "toronto", "vancouver", "montreal", "ottawa", "ontario",
+      "quebec", "calgary", "edmonton", "winnipeg", "kitchener", "mississauga",
+      "mexico", "monterrey", "guadalajara", "tijuana", "juarez", "queretaro",
+      "chihuahua", "saltillo", "hermosillo",
+      // UK & Ireland
+      "united kingdom", "england", "scotland", "wales", "u\\.?k\\.?", "london",
+      "manchester", "edinburgh", "glenrothes", "fife", "glasgow", "sheffield",
+      "coventry", "derby", "ireland", "dublin", "cork", "limerick", "galway",
+      // Germany
+      "germany", "berlin", "munich", "stuttgart", "frankfurt", "cologne",
+      "hamburg", "dresden", "leipzig", "regensburg", "nuremberg", "n[uü]rnberg",
+      "d[uü]sseldorf", "wolfsburg", "ingolstadt", "hannover", "dortmund",
+      // France, Benelux
+      "france", "paris", "toulouse", "grenoble", "lyon", "bordeaux", "nantes",
+      "netherlands", "amsterdam", "eindhoven", "veldhoven", "rotterdam",
+      "belgium", "brussels", "luxembourg",
+      // Iberia, Italy
+      "spain", "madrid", "barcelona", "bilbao", "portugal", "lisbon", "porto",
+      "italy", "milan", "turin", "torino", "bologna",
+      // Nordics
+      "sweden", "stockholm", "gothenburg", "denmark", "copenhagen", "finland",
+      "helsinki", "espoo", "norway", "oslo", "trondheim", "iceland",
+      "reykjav[ií]k",
+      // Central & Eastern Europe (Serbia was the mechanical tracker's miss)
+      "poland", "warsaw", "krakow", "wroclaw", "gdansk", "czechia",
+      "czech republic", "prague", "brno", "slovakia", "bratislava", "hungary",
+      "budapest", "romania", "bucharest", "cluj", "bulgaria", "sofia", "serbia",
+      "belgrade", "novi sad", "croatia", "zagreb", "slovenia", "ljubljana",
+      "bosnia", "sarajevo", "north macedonia", "skopje", "ukraine", "kyiv",
+      "kiev", "lviv", "belarus", "minsk", "moldova", "lithuania", "vilnius",
+      "latvia", "riga", "estonia", "tallinn", "greece", "athens", "russia",
+      "moscow",
+      // Switzerland & Austria
+      "switzerland", "zurich", "geneva", "basel", "lausanne", "austria",
+      "vienna", "graz",
+      // India
+      "india", "bengaluru", "bangalore", "hyderabad", "pune", "mumbai",
+      "gurugram", "gurgaon", "noida", "chennai", "delhi", "kolkata",
+      "ahmedabad", "coimbatore", "kochi",
+      // East Asia
+      "china", "beijing", "shanghai", "shenzhen", "guangzhou", "suzhou", "wuxi",
+      "chengdu", "xi'?an", "wuhan", "tianjin", "nanjing", "chongqing", "dalian",
+      "hangzhou", "hong kong", "japan", "tokyo", "osaka", "yokohama", "nagoya",
+      "kyoto", "kobe", "korea", "seoul", "suwon", "icheon", "incheon", "busan",
+      "ulsan", "taiwan", "taipei", "hsinchu", "taichung", "kaohsiung", "tainan",
+      // Southeast Asia & Oceania
+      "singapore", "philippines", "manila", "cebu", "vietnam", "hanoi",
+      "ho chi minh", "indonesia", "jakarta", "thailand", "bangkok", "malaysia",
+      "kuala lumpur", "australia", "sydney", "melbourne", "brisbane", "perth",
+      "new zealand", "auckland",
+      // Latin America
+      "brazil", "sao paulo", "argentina", "buenos aires", "colombia", "bogota",
+      "chile", "peru", "costa rica", "uruguay",
+      // Middle East & Africa
+      "israel", "tel aviv", "haifa", "turkey", "istanbul", "ankara", "egypt",
+      "cairo", "uae", "dubai", "abu dhabi", "saudi arabia", "riyadh", "jeddah",
+      "qatar", "doha", "morocco", "casablanca", "tunisia", "south africa",
+      "nigeria", "lagos", "kenya", "nairobi",
+      // South Asia
+      "pakistan", "karachi", "lahore", "bangladesh", "dhaka", "sri lanka",
+      "colombo",
+    ].join("|") +
+    ")\\b",
+  "i",
+);
 
 // The location GATE. Returns true = alert, false = drop. Fails OPEN: unknown,
 // remote, or a bare US-looking city all pass. Only a confidently non-US string

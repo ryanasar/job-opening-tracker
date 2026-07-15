@@ -147,6 +147,8 @@ test("ambiguous locations fail OPEN -- never drop a possible US job", () => {
   us("");                          // no data
   us("Remote");                    // bare remote -> assume reachable
   us("Chicago");                   // bare US city, no state -> keep
+  us("Cambridge");                 // could be Cambridge MA -> keep (why we never
+                                   // add bare "cambridge" to the foreign list)
 });
 
 test("confidently non-US locations are dropped", () => {
@@ -160,6 +162,38 @@ test("confidently non-US locations are dropped", () => {
   foreign("Singapore");
   foreign("Tokyo, Japan");
   foreign("Tel Aviv, Israel");
+});
+
+// The mechanical tracker (jobwatch-mech) shares this gate, and its watchlist is
+// heavy on international employers -- so these have to drop too. Serbia was the
+// concrete miss that prompted the expansion.
+test("international mechanical-employer locations are dropped", () => {
+  foreign("Belgrade, Serbia");     // the miss
+  foreign("Novi Sad, Serbia");
+  foreign("Monterrey, Mexico");    // auto / manufacturing plants
+  foreign("Guadalajara");          // bare Mexican city, no country named
+  foreign("Stuttgart, Germany");   // Bosch / ZF / Mercedes
+  foreign("Wolfsburg");            // VW, bare city
+  foreign("Eindhoven, Netherlands");   // ASML
+  foreign("Veldhoven");            // ASML HQ, bare city
+  foreign("Hsinchu, Taiwan");      // semiconductor belt
+  foreign("Suwon, South Korea");   // Samsung
+  foreign("Bristol, UK");          // Graphcore -- caught by the country, not the city
+  foreign("Cambridge, UK");        // Arm -- caught by the country, not the city
+  foreign("Toulouse, France");     // aerospace
+  foreign("Bratislava, Slovakia");
+});
+
+// The flip side of the blocklist: US cities that share a name with a foreign one
+// must still be kept. The state abbreviation makes US_SIGNAL win before the
+// blocklist is even consulted -- proof the expansion added no false drops.
+test("US cities that collide with foreign names are kept (state wins)", () => {
+  us("Cambridge, MA");             // not Cambridge, UK
+  us("Rome, GA");                  // not Rome, Italy
+  us("Birmingham, AL");            // not Birmingham, UK
+  us("Bristol, TN");               // not Bristol, UK
+  us("Naples, FL");                // not Naples, Italy
+  us("Waterloo, IA");              // not Waterloo, Ontario
 });
 
 test("manager roles are NO -- they are never a new-grad job", () => {
