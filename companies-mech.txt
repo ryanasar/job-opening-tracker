@@ -61,7 +61,6 @@ L3Harris Technologies
 Leidos
 SAIC
 KBR
-Oceaneering
 Bechtel
 Fluor
 Burns & McDonnell

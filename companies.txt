@@ -71,7 +71,6 @@ Two Sigma
 DRW
 Lockheed Martin
 Northrop Grumman
-Raytheon
 Notion
 Figma
 Vercel
