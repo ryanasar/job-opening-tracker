@@ -385,6 +385,34 @@ export const ADAPTERS = {
       }));
   },
 
+  // ---------- coverage net #2: off-season internships ----------
+  // The firehose above is full-time NEW-GRAD only. This is the same idea for the
+  // INTERNSHIP track. SimplifyJobs' internship repo -- despite the "Summer" name
+  // -- carries every term in a structured `terms` field, so we keep only the
+  // off-season terms a May-2027 grad can actually take and drop summer + past
+  // ones right here. The kept term is folded into the title because the
+  // classifier scores the TITLE (see screen() in classify.js), not this feed's
+  // fields; that also means every row resolves on a regex, with zero LLM calls.
+  //
+  // MAINTENANCE: bump the repo URL and WANT set each cycle. Right now a May-2027
+  // grad's off-season = Fall 2026 / Winter 2026-27 / Spring 2027, all present in
+  // the Summer2026 repo. When SimplifyJobs rolls to a Summer2027 repo, point here.
+  async internships(c) {
+    const WANT = new Set(["Fall 2026", "Winter 2026", "Winter 2027", "Spring 2027"]);
+    const d = await j("https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/.github/scripts/listings.json");
+    return (d || [])
+      .filter((x) => x.active !== false && x.is_visible !== false)
+      .filter((x) => (x.terms || []).some((t) => WANT.has(t)))
+      .sort((a, b) => (b.date_updated || 0) - (a.date_updated || 0))
+      .slice(0, 500)
+      .map((x) => ({
+        id: String(x.id),
+        title: `${x.company_name} — ${x.title} (${(x.terms || []).filter((t) => WANT.has(t)).join(", ")})`,
+        location: (x.locations || []).join(", "),
+        url: x.url,
+      }));
+  },
+
   // ---------- tier 3: generic HTML diff ----------
   // For portals with no capturable JSON. Pulls hrefs matching a pattern out of
   // the raw page. Crude, but it notices when a link appears that wasn't there

@@ -19,7 +19,10 @@ import { REGISTRY } from "./registry.js";
 export const COMPANIES = [
   ...Object.entries(REGISTRY).map(([name, entry]) => ({ name, ...entry })),
 
-  // Coverage net. Not a company -- a firehose. Catches everything in
-  // UNRESOLVED.md, plus the companies you never thought to add.
+  // Coverage nets. Not companies -- firehoses. The new-grad one catches
+  // everything in UNRESOLVED.md plus companies you never added; the internship
+  // one is the ONLY backstop for the off-season internship track (direct polling
+  // is the only other source, so browser-walled shops like Tesla depend on this).
   { name: "New-grad firehose", adapter: "aggregator" },
+  { name: "Off-season internship firehose", adapter: "internships" },
 ];

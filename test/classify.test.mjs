@@ -116,6 +116,16 @@ test("an internship with NO term named is ambiguous -- ask, never drop", () => {
   ask("Engineering Intern");
 });
 
+// The off-season internship firehose folds the kept term into the title
+// ("Company — Title (Fall 2026)") precisely so these resolve on a regex here --
+// no LLM call. This is the exact shape the `internships` adapter emits, and the
+// Tesla Energy role the bot missed is the first case.
+test("off-season internship firehose: the folded term drives the verdict", () => {
+  high("Tesla — Software Engineer Intern - Opticaster - Energy Engineering (Fall 2026)");
+  high("Tesla — Mobile App Software Engineer Intern - Energy Engineering (Fall 2026)");
+  no("Tesla — Data Analyst Intern - Energy (Fall 2026)");   // off-season but not engineering
+});
+
 // --- the alert tag ---------------------------------------------------------
 
 test("track() labels the alert so the two are never confused", () => {
