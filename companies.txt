@@ -87,3 +87,5 @@ Wiz
 CrowdStrike
 Lyft
 Snap
+Instacart
+Patreon
