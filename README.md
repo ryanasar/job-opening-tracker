@@ -1,10 +1,11 @@
 # jobwatch
 
 A Cloudflare Worker that checks company careers pages every 5 minutes and sends me
-a Telegram message when a new-grad or off-season internship role shows up. It hits
-each company's real portal, diffs against what it saw last time, and pings me
-within a few minutes of a req going live. Summer internships are skipped on purpose
-— I graduate in 2027, so they don't do me any good.
+a Telegram message when a new-grad software role or a software internship shows up. It hits each
+company's real portal, diffs against what it saw last time, and pings me within a
+few minutes of a req going live. Two tracks: full-time new grad (class of 2027) and
+software internships/co-ops for any 2027 term, summer included. Only companies on
+my list — no aggregator feed.
 
 I built it because I got tired of refreshing job boards and still finding out about
 roles a day late, after they'd already gotten a few hundred applicants.
@@ -50,25 +51,33 @@ three tiers:
 - `html` fallback — pull job links straight out of the raw HTML with a regex. Ugly,
   but it works on anything.
 
-On top of the per-company adapters there's a SimplifyJobs aggregator running as a
-catch-all, so a new-grad role at a company I never added still has a chance of
-getting caught. (The mechanical copy deliberately runs without it — there's no good
-aggregator for those roles, so its watchlist has to carry the whole load.)
+There's no aggregator or catch-all feed. I ran a SimplifyJobs firehose as a safety
+net for a while and took it out: I'd rather the watchlist be the whole story than
+get slower, noisier alerts for companies I hadn't chosen. The cost is real and
+worth naming — if a company isn't on my list, or its adapter hasn't been cracked
+yet, I don't hear about it at all.
 
 **Every company names the same job differently.** "SDE I", "Technology Development
 Program", "Engineer, University Grad", "Early Career SWE", or just "Software
 Engineer" with the class year buried in the description. No regex covers all of that.
 
-So the classifier does the cheap checks first — an obvious-no regex, then a new-grad
-allowlist (the title has to actually say entry-level: new grad, junior, 2027, SWE I,
-associate, and so on). The only titles that reach an LLM call are the genuinely
-ambiguous ones, mostly internships with no season attached, where it reads the
-posting to decide. Verdicts get cached in KV per title string and basically never
-expire, because companies repost the same titles constantly. After the first week
-it barely calls the API — a few hundred Claude Haiku 4.5 calls across a whole
-recruiting season. There's also a US-only location filter that runs before the
-classifier, so confidently-foreign roles get dropped before they cost anything, and
-a daily digest that backstops the whole thing in case a verdict was wrong.
+So the classifier is an allowlist: the title has to actually say entry-level (new
+grad, junior, 2027, SWE I, associate, and so on), and anything that says senior,
+staff, manager or "Engineer II" is dropped. A bare "Software
+Engineer" is dropped too — a real new-grad req almost always names itself, and
+treating plain titles as maybes buried me in mid-level roles. Internships are
+the other path: "intern" or "co-op" is itself the entry-level signal, so those only
+need a software word, no other engineering discipline (no "Mechanical Engineer
+Intern"), and a live year (not Summer 2026, not 2028).
+
+It used to call Claude Haiku on the titles regexes couldn't judge, and read the
+posting's description to catch "5+ years" hiding under a junior-sounding title.
+The only bucket that ever needed either was a seasonless internship, back when
+summer terms were excluded; with every term in scope that question is gone, so the whole
+LLM and description-fetch layer is gone: a verdict is now a handful of regexes
+against the title, which means no API key, no per-job detail requests, and no
+per-job cost. There's also a US-only location filter, and a daily digest that
+backstops the whole thing in case a verdict was wrong.
 
 ## Setup
 
@@ -83,7 +92,6 @@ wrangler kv namespace create JOBS       # paste the id into wrangler.toml
 
 wrangler secret put TG_TOKEN            # from @BotFather -> /newbot
 wrangler secret put TG_CHAT_ID          # api.telegram.org/bot<TOKEN>/getUpdates
-wrangler secret put ANTHROPIC_KEY       # for the title classifier
 wrangler secret put ADMIN_KEY           # any random string, gates the admin routes
 
 wrangler deploy
@@ -121,17 +129,17 @@ endpoints, not a CPU thing.
 
 ## Cost
 
-Runs about $5.40/month all in, and it's mostly just the $5 base plan. My software
-list currently resolves to about 70 companies, all polled every 5 minutes:
+Runs $5/month, which is just the base plan — there's no per-job cost left now that
+the classifier is pure regex. My software list resolves to 71 companies, all polled
+every 5 minutes:
 
 | | usage | included on the $5 plan |
 |---|---|---|
 | Worker invocations | ~8,600/month (288/day, 5-min cron) | 10M/month |
-| KV reads | ~1.5M/month | 10M/month |
+| KV reads | ~2.5M/month | 10M/month |
 | KV writes | a few thousand/month (only on real changes) | 1M/month |
 | Cron triggers | 2 (the 5-min poll + a daily digest) | — |
-| Anthropic | a few hundred Claude Haiku 4.5 calls total | cents |
 
-There's 5–10x headroom on everything, so the same $5 would cover a few hundred
+There's 4–10x headroom on everything, so the same $5 would cover a few hundred
 companies before anything gets tight. `npm run budget` re-checks this against the
 live boards whenever the list grows.

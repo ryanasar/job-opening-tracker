@@ -10,6 +10,9 @@ import assert from "node:assert/strict";
 import { checkCompany, runAll } from "../src/index.js";
 import { createEngine } from "../src/engine.js";
 import { classify as sweClassify, track as sweTrack } from "../src/classify.js";
+import { RETRY } from "../src/adapters.js";
+
+RETRY.delays = [0, 0];   // keep the retry path, drop the real-time waits
 
 const COMPANIES = [{ name: "TestCo", adapter: "greenhouse", slug: "testco" }];
 
@@ -35,13 +38,12 @@ function makeKV() {
 
 let board;      // what the fake Greenhouse board currently returns
 let boardFail;  // set to an HTTP status to make the board break
-let verdict;    // what the fake Anthropic API replies
-let llmFail;    // set true to make the classifier API 500
+let failTimes;  // with boardFail: fail only this many requests, then recover
+let boardHits;  // list requests made against the board
 let sent;       // Telegram messages we captured
 let env;
-let descs;      // jobId -> description HTML, served by the fake detail endpoint
-let descFail;   // set true to make the description fetch 500
-let descFetches; // how many times we went and read a description
+let llmCalls;   // must stay 0: the classifier is pure regex now
+let descFetches; // must stay 0: descriptions are never read
 
 const job = (id, title, location = "Austin, TX") => ({
   id, title, location: { name: location }, absolute_url: `https://x.test/${id}`,
@@ -50,13 +52,12 @@ const job = (id, title, location = "Austin, TX") => ({
 beforeEach(() => {
   board = [];
   boardFail = 0;
-  verdict = "YES";
-  llmFail = false;
+  failTimes = Infinity;
+  boardHits = 0;
   sent = [];
-  descs = {};
-  descFail = false;
+  llmCalls = 0;
   descFetches = 0;
-  env = { JOBS: makeKV(), TG_TOKEN: "t", TG_CHAT_ID: "c", ANTHROPIC_KEY: "k" };
+  env = { JOBS: makeKV(), TG_TOKEN: "t", TG_CHAT_ID: "c" };
 
   globalThis.fetch = async (url, init) => {
     const u = String(url);
@@ -65,19 +66,21 @@ beforeEach(() => {
       sent.push(JSON.parse(init.body));
       return new Response("{}", { status: 200 });
     }
+    // Both of these are dead paths now -- the classifier decides on the title
+    // alone. They stay wired up, and COUNTED, so a regression that reintroduces
+    // a per-job request or an LLM call is visible instead of silent.
     if (u.includes("api.anthropic.com")) {
-      if (llmFail) return new Response("boom", { status: 500 });
-      return Response.json({ content: [{ text: verdict }] });
+      llmCalls++;
+      return Response.json({ content: [{ text: "YES" }] });
     }
     if (u.includes("boards-api.greenhouse.io")) {
-      if (boardFail) return new Response("nope", { status: boardFail });
-      // The real Greenhouse DETAIL endpoint: /boards/{slug}/jobs/{id}. This is
-      // where the description lives, and it is a separate request from the list.
-      const m = u.match(/\/jobs\/(\w+)$/);
-      if (m) {
+      if (!/\/jobs\/\w+$/.test(u)) boardHits++;
+      if (boardFail && boardHits <= failTimes) return new Response("nope", { status: boardFail });
+      // The real Greenhouse DETAIL endpoint: /boards/{slug}/jobs/{id} -- where a
+      // description would live, and a separate request from the list.
+      if (/\/jobs\/\w+$/.test(u)) {
         descFetches++;
-        if (descFail) return new Response("nope", { status: 500 });
-        return Response.json({ content: descs[m[1]] || "" });
+        return Response.json({ content: "" });
       }
       return Response.json({ jobs: board });
     }
@@ -104,28 +107,9 @@ test("first poll seeds silently -- records existing jobs, sends nothing", async 
   assert.deepEqual(await env.JOBS.get("seen:TestCo", "json"), ["1", "2"]);
 });
 
-test("seeding does not call the classifier", async () => {
-  let llmCalls = 0;
-  const inner = globalThis.fetch;
-  globalThis.fetch = async (u, i) => {
-    if (String(u).includes("anthropic")) llmCalls++;
-    return inner(u, i);
-  };
-  // A seasonless "Software Engineer Intern" is ambiguous, so it WOULD hit the LLM
-  // if we classified during seeding. (A bare full-time title no longer would --
-  // it is dropped on the title.)
-  board = [job(1, "Software Engineer Intern"), job(2, "Software Engineer Intern")];
-
-  await runAll(env, COMPANIES);
-
-  assert.equal(llmCalls, 0, "seeding 43 boards would otherwise be thousands of pointless LLM calls");
-});
-
-// --- the title allowlist + the experience gate ------------------------------
-// A full-time title with no entry-level signal is dropped on the TITLE -- no
-// description, no LLM. The only titles that still reach a description read are
-// seasonless internships, where the gate catches an "intern" posting that is
-// really a senior req.
+// --- the title allowlist is the WHOLE decision -------------------------------
+// Every verdict comes from the title. Nothing fetches a description, nothing
+// calls an LLM. Internships of any 2027 term alert, tagged as such.
 
 const seedThen = async (next) => {
   board = [job(1, "Placeholder")];
@@ -135,109 +119,73 @@ const seedThen = async (next) => {
   await runAll(env, COMPANIES);
 };
 
-test("a bare full-time title is dropped on the title alone -- no description, no LLM", async () => {
-  let llmCalls = 0;
-  const inner = globalThis.fetch;
-  globalThis.fetch = async (u, i) => { if (String(u).includes("anthropic")) llmCalls++; return inner(u, i); };
-  descs["2"] = "5+ years of professional experience";   // never even read
+test("the poll NEVER reads a description and NEVER calls an LLM", async () => {
+  // One of each interesting shape: a match, a bare title, an internship, a
+  // senior req. Under the old classifier the internship alone would have cost a
+  // detail fetch plus a Haiku call.
+  await seedThen([
+    job(2, "Software Engineer I"),
+    job(3, "Software Engineer"),
+    job(4, "Software Engineer Intern"),
+    job(5, "Senior Staff Engineer"),
+  ]);
 
+  assert.equal(descFetches, 0, "the title decides -- there is nothing to look up");
+  assert.equal(llmCalls, 0, "and nothing to ask: ANTHROPIC_KEY is no longer used at all");
+  assert.equal(loud().length, 2, "the Engineer I match and the internship alert");
+});
+
+test("a bare full-time title is dropped on the title alone", async () => {
   await seedThen([job(2, "Software Engineer")]);
 
   assert.equal(sent.length, 0, "this is the mid-level flood the user was drowning in");
   assert.equal(descFetches, 0, "no entry-level signal in the title -> nothing to look up");
-  assert.equal(llmCalls, 0, "and no LLM call either");
 });
 
-test("a seasonless internship wanting 5+ years is DROPPED after reading the description", async () => {
-  verdict = "UNSURE";
-  descs["2"] = "<p>Requirements</p><ul><li>5+ years of professional software engineering experience, not including internships</li></ul>";
+test("an internship alerts whatever its 2027 term, tagged as an internship", async () => {
+  await seedThen([
+    job(2, "Software Engineer Intern - Fall 2026"),
+    job(3, "Software Engineering Co-op - Spring 2027"),
+    job(4, "Software Engineer Intern"),               // seasonless: no LLM, no description
+    job(5, "Summer 2027 Software Engineer Intern"),
+    job(6, "Summer 2026 Software Engineer Intern"),   // over -- dropped
+    job(7, "2027 Mechanical Engineer Intern"),        // not software -- dropped
+  ]);
 
-  await seedThen([job(2, "Software Engineer Intern")]);
-
-  assert.equal(sent.length, 0, "an 'intern' title asking for 5 years is a mislabeled senior req");
-  assert.equal(descFetches, 1, "and it cost exactly one extra request");
+  assert.equal(loud().length, 4);
+  assert.ok(loud().every((m) => m.text.includes("internship")), "the alert names the track");
+  assert.equal(descFetches, 0);
+  assert.equal(llmCalls, 0);
 });
 
-test("a seasonless internship with an entry-level description still alerts", async () => {
-  verdict = "UNSURE";
-  descs["2"] = "<p>Requirements</p><ul><li>1+ year of experience</li><li>BS in Computer Science</li></ul>";
-
-  await seedThen([job(2, "Software Engineer Intern")]);
-
-  assert.equal(quiet().length, 1, "1 year is not a barrier -- keep escalating the uncertain ones");
-});
-
-test("an EXPLICIT new-grad title never reads a description at all", async () => {
-  descs["2"] = "5+ years of experience required";   // boilerplate that would fail the gate
-
+test("an EXPLICIT new-grad title alerts without any extra request", async () => {
   await seedThen([job(2, "Software Engineer I")]);
 
-  assert.equal(loud().length, 1, "the title already settled it -- a stray years line must not kill it");
+  assert.equal(loud().length, 1, "the title settled it");
   assert.equal(descFetches, 0, "and we must not pay for a request we don't need");
 });
 
-test("a senior title is dropped on the title alone -- no description fetched", async () => {
+test("a senior title is dropped on the title alone", async () => {
   await seedThen([job(2, "Senior Staff Engineer")]);
 
   assert.equal(sent.length, 0);
   assert.equal(descFetches, 0, "screen() said no; there is nothing a description could add");
 });
 
-test("a new-grad phrase in the description OVERRIDES a years requirement", async () => {
-  verdict = "UNSURE";
-  // A seasonless internship whose description reads as new-grad but still lists
-  // years under "preferred". Dropping it would cost a real role.
-  descs["2"] = "New Grad friendly. Preferred: 3+ years of experience with distributed systems.";
+test("the poll list contains ONLY listed companies -- no firehose, no aggregator", async () => {
+  // The two SimplifyJobs coverage nets were removed on request. This asserts the
+  // shipped config can't quietly grow one back: every entry must be a real
+  // company from the registry, with a real adapter.
+  const { COMPANIES: SHIPPED } = await import("../src/config.js");
+  const { ADAPTERS } = await import("../src/adapters.js");
 
-  await seedThen([job(2, "Software Engineer Intern")]);
-
-  assert.equal(quiet().length, 1, "a false negative costs a job -- recall wins ties (invariant 3)");
-});
-
-test("the gate FAILS OPEN: if the description can't be fetched, the job still alerts", async () => {
-  verdict = "UNSURE";
-  descFail = true;
-
-  await seedThen([job(2, "Software Engineer Intern")]);
-
-  assert.equal(quiet().length, 1, "a 500 on the description must never silently eat a posting");
-});
-
-test("the years gate beats a cached verdict", async () => {
-  verdict = "UNSURE";
-  await env.JOBS.put("verdict:testco|software engineer intern", "maybe");   // cached from before
-  descs["2"] = "We need 7+ years of industry experience.";
-
-  await seedThen([job(2, "Software Engineer Intern")]);
-
-  assert.equal(sent.length, 0, "the cache must not be able to resurrect a 7-years role");
-});
-
-test("a bare title from the AGGREGATOR is kept -- the feed is new-grad-curated", async () => {
-  // Same title, two sources. On the company's own board it is mid-level noise; on
-  // the SimplifyJobs new-grad feed it is a real role the feed didn't restate.
-  const AGG = [{ name: "New-grad firehose", adapter: "aggregator" }];
-  globalThis.fetch = async (url, init) => {
-    const u = String(url);
-    if (u.includes("api.telegram.org")) { sent.push(JSON.parse(init.body)); return new Response("{}", { status: 200 }); }
-    if (u.includes("githubusercontent.com")) return Response.json(board);
-    throw new Error("unexpected fetch: " + u);
-  };
-  // the aggregator adapter builds the title from company_name + title, and the
-  // location from a `locations` array -- match that shape, not the normalized one.
-  const aggJob = (id, company) => ({
-    id, company_name: company, title: "Software Engineer",
-    locations: ["Austin, TX"], url: "https://x/" + id, active: true,
-  });
-
-  board = [aggJob("a1", "Acme")];
-  await runAll(env, AGG);            // seed
-  sent = [];
-  board = [aggJob("a1", "Acme"), aggJob("a2", "Beta")];
-  await runAll(env, AGG);
-
-  assert.equal(sent.length, 1, "the aggregator's bare title is trusted and alerts");
-  assert.equal(quiet().length, 1, "on the quiet channel -- the title itself never confirmed it");
+  assert.ok(SHIPPED.length > 0, "the registry should not be empty");
+  for (const c of SHIPPED) {
+    assert.ok(ADAPTERS[c.adapter], `${c.name}: unknown adapter ${c.adapter}`);
+    assert.ok(!/firehose/i.test(c.name), `${c.name} is a firehose, not a company`);
+    assert.ok(c.adapter !== "aggregator" && c.adapter !== "internships",
+      `${c.name}: coverage nets were removed -- only companies.txt is polled`);
+  }
 });
 
 // --- alerting on genuinely new IDs -----------------------------------------
@@ -266,7 +214,7 @@ test("a high-confidence in-region match is LOUD and carries title, location and 
 
   const t = loud()[0].text;
   assert.match(t, /TestCo/);
-  assert.match(t, /new grad/, "the track tag: an internship and a full-time role read very differently");
+  assert.match(t, /new grad/, "the track tag");
   assert.match(t, /Software Engineer I/);
   assert.match(t, /Austin, TX/);
   assert.match(t, /href="https:\/\/x\.test\/2"/, "the apply link is the whole point");
@@ -282,7 +230,7 @@ test("the SOFTWARE Worker makes no sound -- every message is disable_notificatio
   board = [
     job(1, "Placeholder"),
     job(2, "Software Engineer I", "Austin, TX"),        // 🔴 high confidence
-    job(3, "Software Engineer Intern - Fall 2026"),     // 🔴 internship track
+    job(3, "New Grad Software Engineer", "Seattle, WA"),
   ];
   await runAll(env, COMPANIES);
 
@@ -304,27 +252,13 @@ test("a Worker with silent:false sends LOUD alerts (Josh's mechanical tracker)",
   assert.equal(sent[0].disable_notification, false, "Josh's alerts must make a sound");
 });
 
-test("an uncertain match still arrives, never dropped", async () => {
-  board = [job(1, "Placeholder")];
-  await runAll(env, COMPANIES);
-
-  verdict = "UNSURE";
-  // A seasonless internship is the ambiguous case that still asks the LLM.
-  board = [job(1, "Placeholder"), job(2, "Software Engineer Intern")];
-  await runAll(env, COMPANIES);
+test("a job with NO title fails OPEN to the quiet channel", async () => {
+  // The last thing 🟡 means. An empty title is a broken adapter mapping, not a
+  // boring role -- dropping it silently is exactly the failure mode invariant 3
+  // exists to prevent.
+  await seedThen([job(2, "")]);
 
   assert.equal(loud().length, 0);
-  assert.equal(quiet().length, 1, "alert fatigue is a miss: uncertain goes to the quiet channel");
-});
-
-test("the classifier FAILS OPEN -- an API error becomes 'maybe', never a silent drop", async () => {
-  board = [job(1, "Placeholder")];
-  await runAll(env, COMPANIES);
-
-  llmFail = true;
-  board = [job(1, "Placeholder"), job(2, "Software Engineer Intern")];
-  await runAll(env, COMPANIES);
-
   assert.equal(quiet().length, 1, "a false positive costs 2s of scrolling; a false negative costs a job");
 });
 
@@ -403,6 +337,24 @@ test("the broken-adapter warning fires on the 6th consecutive failure, not befor
   await checkCompany(env, COMPANIES[0]);   // 6th
   assert.equal(sent.length, 1);
   assert.match(sent[0].text, /adapter broken \(6x\)/);
+});
+
+test("a transient 429/5xx is retried within the poll and never counts as a failure", async () => {
+  board = [{ id: 1, title: "Software Engineer I", location: { name: "Austin, TX" }, absolute_url: "https://x.test/1" }];
+  boardFail = 503;
+  failTimes = 2;                       // Snap's 504s, Salesforce's 429s: they clear
+
+  const r = await checkCompany(env, COMPANIES[0]);
+  assert.equal(r.error, undefined);
+  assert.equal(boardHits, 3);
+  assert.equal(await env.JOBS.get("fail:TestCo"), null);
+});
+
+test("a 404 is drift, not a blip -- no retry", async () => {
+  boardFail = 404;
+  await checkCompany(env, COMPANIES[0]);
+  assert.equal(boardHits, 1);
+  assert.equal(await env.JOBS.get("fail:TestCo"), "1");
 });
 
 test("a broken adapter stops burning writes once it has alerted", async () => {

@@ -1,6 +1,10 @@
 // Application tracker. A private CRM for roles you've applied to -- distinct
 // from the discovery pipeline (that stays Telegram-only). Same Worker, same KV,
-// same ADMIN_KEY gate. New-grad vs internship split comes from track() for free.
+// same ADMIN_KEY gate.
+//
+// The New Grad / Internships split. The tracker owns its own trackOf() below
+// rather than borrowing the software classifier's track(): this file is shared
+// with the mechanical Worker, whose profile is new-grad only.
 //
 // KV: one key "applications" holding an array of:
 //   { id, company, title, url, location, track, status,
@@ -12,7 +16,11 @@
 // reads updatedAt, so nothing may touch updatedAt unless the row actually
 // changed -- see the write rule in handleApi().
 
-import { track } from "./classify.js";
+// Which track a row lands in when nothing says. Only for hand-entered rows: a
+// row filed from an alert carries its track in the link (`k`), since the engine
+// tags every alert with the profile's track.
+const trackOf = (title) =>
+  /\b(intern|internship|co[\s-]?op)\b/i.test(title || "") ? "internship" : "new grad";
 
 // The pipeline. `kind` drives the header counts (tracked/active/offers/closed),
 // `color` is the single source of truth for the pill, the card's left border and
@@ -165,7 +173,7 @@ export async function logApplied(env, u) {
     apps.push({
       id, company, title, url,
       location: job.l || "",
-      track: job.k || track(title),
+      track: job.k || trackOf(title),
       status: "applied",
       createdAt: now, appliedAt: now, updatedAt: now,
       notes: "", priority: false,

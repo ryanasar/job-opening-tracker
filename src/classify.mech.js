@@ -3,11 +3,14 @@
 //   1. the field is MECHANICAL, and SOFTWARE is an explicit exclude -- a SWE role
 //      must never reach the mechanical tracker.
 //   2. NEW GRAD ONLY. Internships are dropped (no seasons, no co-ops).
-//   3. TIGHT + PURE REGEX. A title alerts only if it names both his field and an
-//      entry level. There is no aggregator backstop for mechanical roles (the
-//      SimplifyJobs feed is CS-only), and no ambiguous middle to escalate, so
-//      there is no LLM call and no description read here at all -- the allowlist
-//      IS the decision. That also means this Worker adds ~zero Anthropic cost.
+//   3. TIGHT allowlist. A title alerts only if it names both his field and an
+//      entry level.
+//
+// Both classifiers are PURE REGEX now -- classify.js converged on this shape when
+// its internship track (the only ambiguous bucket, and the only reason it read
+// descriptions or called an LLM) was removed. Neither has an aggregator behind
+// it, so in both cases the allowlist IS the decision and recall is the
+// watchlist's job. Neither Worker spends anything on Anthropic.
 //
 // This file is intentionally self-contained (it shares the poll ENGINE with the
 // software Worker, not the classifier) so the two allowlists are tuned

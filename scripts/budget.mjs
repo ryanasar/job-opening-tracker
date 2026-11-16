@@ -29,9 +29,6 @@ const TICKS_PER_DAY = (24 * 60) / POLL_EVERY_MIN;   // 288
 const PAID = {
   reads: 10_000_000, writes: 1_000_000, deletes: 1_000_000, cpuMs: 30_000_000, requests: 10_000_000,
 };
-// Haiku 4.5: $1 / M input, $5 / M output.
-const HAIKU = { in: 1 / 1e6, out: 5 / 1e6 };
-const TOK = { in: 320, out: 5 };   // prompt is ~300 tok + the title; reply is one word
 
 const fmt = (n) => n.toLocaleString("en-US");
 const pct = (n, d) => `${((n / d) * 100).toFixed(1)}%`;
@@ -102,29 +99,32 @@ if (churn.length) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Classifier load: how many live titles actually reach the LLM?
+// 2. Classifier load: how much of a live board actually matches?
 // ---------------------------------------------------------------------------
-let titles = 0, toLLM = 0;
+// There is no LLM tier any more, so this costs nothing to run and nothing to
+// serve -- it is a signal about the ALLOWLIST, not about spend. A rate of 0.0%
+// across every board is worth a look: either nobody is hiring new grads this
+// week, or NEWGRAD_SIGNAL has drifted behind how these boards title their reqs.
+let titles = 0, matches = 0;
 for (const c of COMPANIES) {
   try {
     for (const j of await fetchCompany(c)) {
       titles++;
-      if (screen(j.title) === null) toLLM++;   // null == "ask the LLM"
+      if (screen(j.title) === "high") matches++;
     }
   } catch { /* already reported */ }
 }
-const llmRate = toLLM / titles;
 
 // ---------------------------------------------------------------------------
 // 3. Replay a full day against the counted KV.
 // ---------------------------------------------------------------------------
-const env = { JOBS: makeKV(), TG_TOKEN: "x", TG_CHAT_ID: "x", ANTHROPIC_KEY: "x" };
-let llmCalls = 0;
+const env = { JOBS: makeKV(), TG_TOKEN: "x", TG_CHAT_ID: "x" };
+let llmCalls = 0;   // must stay 0 -- the classifier no longer calls anything
 
 globalThis.fetch = async (url, init) => {
   const u = String(url);
   if (u.includes("api.telegram.org")) return new Response("{}", { status: 200 });
-  if (u.includes("api.anthropic.com")) { llmCalls++; return Response.json({ content: [{ text: "UNSURE" }] }); }
+  if (u.includes("api.anthropic.com")) { llmCalls++; return Response.json({ content: [{ text: "YES" }] }); }
   const body = raw.get(u);
   if (body === undefined) return new Response("gone", { status: 503 });
   return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
@@ -145,7 +145,7 @@ const gh = live.find((c) => c.adapter === "greenhouse");
 const ghUrl = `https://boards-api.greenhouse.io/v1/boards/${gh.slug}/jobs`;
 const parsed = JSON.parse(raw.get(ghUrl));
 parsed.jobs.push({
-  id: 999999001, title: "Software Engineer Intern - Fall 2026",
+  id: 999999001, title: "Software Engineer I, New Grad 2027",
   location: { name: "Austin, TX" }, absolute_url: "https://x.test/new",
 });
 raw.set(ghUrl, JSON.stringify(parsed));
@@ -170,9 +170,6 @@ const day = {
 };
 const month = Object.fromEntries(Object.entries(day).map(([k, v]) => [k, Math.round(v * 30)]));
 
-const llmPerDay = Math.round(NEW_JOBS_PER_DAY * llmRate);
-const llmCost = llmPerDay * 30 * (TOK.in * HAIKU.in + TOK.out * HAIKU.out);
-
 // ---------------------------------------------------------------------------
 console.log(`\n─── simulated day: ${live.length} companies, every ${POLL_EVERY_MIN} min (${TICKS_PER_DAY} ticks), ${NEW_JOBS_PER_DAY} new jobs/day\n`);
 console.log(`  seed tick (first poll ever): ${afterSeed.put} writes, ${afterSeed.get} reads`);
@@ -188,12 +185,13 @@ row("writes", month.writes, PAID.writes);
 row("deletes", month.deletes, PAID.deletes);
 row("requests", month.requests, PAID.requests);
 
-console.log(`\n  classifier: ${toLLM}/${titles} live titles (${(llmRate * 100).toFixed(1)}%) are ambiguous enough to reach the LLM`);
-console.log(`  ~${llmPerDay} LLM calls/day  ->  $${llmCost.toFixed(2)}/mo on Haiku 4.5 (and title verdicts cache forever, so this is an overestimate)`);
-console.log(`\n  TOTAL: $5.00 Cloudflare + $${llmCost.toFixed(2)} Anthropic = $${(5 + llmCost).toFixed(2)}/mo\n`);
+console.log(`\n  classifier: ${matches}/${titles} live titles (${(titles ? (matches / titles) * 100 : 0).toFixed(1)}%) match the new-grad allowlist`);
+console.log(`  LLM calls: ${llmCalls}  ${llmCalls === 0 ? "✅ pure regex -- no Anthropic spend at all" : "❌ something is still calling the API"}`);
+console.log(`\n  TOTAL: $5.00 Cloudflare + $0.00 Anthropic = $5.00/mo\n`);
 
 const over = Object.entries(month).filter(([k, v]) => PAID[k] && v > PAID[k]);
-if (over.length || churn.length || steady.put !== 0) {
+if (over.length || churn.length || steady.put !== 0 || llmCalls !== 0) {
+  if (llmCalls !== 0) console.log(`  ❌ ${llmCalls} LLM calls. The classifier is meant to be pure regex now.`);
   if (steady.put !== 0) console.log(`  ❌ a steady-state poll is writing to KV. That is the invariant that keeps this cheap.`);
   for (const [k, v] of over) console.log(`  ❌ ${k}: ${fmt(v)}/mo exceeds the ${fmt(PAID[k])} included`);
   process.exit(1);

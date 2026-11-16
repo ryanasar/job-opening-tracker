@@ -6,19 +6,42 @@
 //
 // All return: [{ id, title, location, url }]
 //
-// Some also return `description` (lever, ashby) because their list payload
-// already contains it -- free. Everyone else describes LAZILY: see describe().
+// Titles are the ONLY thing the classifier reads. Descriptions used to be
+// fetched for ambiguous titles (a lazy describe() + an LLM call); that bucket
+// disappeared when the internship track was removed, so all of that machinery
+// is gone -- these adapters return list data and nothing else.
 
 const UA = {
   "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
   Accept: "application/json,text/html",
 };
 
-async function j(url, init = {}) {
-  const r = await fetch(url, { ...init, headers: { ...UA, ...(init.headers || {}) } });
-  if (!r.ok) throw new Error(`${r.status} ${url}`);
-  return r.json();
+// Transient upstream errors (429 throttling, 5xx gateway blips, dropped
+// connections) get retried within the same poll. Without this, Salesforce's
+// Workday -- which 429s roughly every other request -- and a few minutes of
+// Snap/Oracle 504s were enough to trip the 6x broken-adapter alert. A 4xx other
+// than 429 is a real drift signal and fails immediately. Waiting costs wall
+// time, not CPU. Exported so tests can zero the delays.
+export const RETRY = { delays: [2000, 6000] };
+const transient = (s) => s === 429 || s >= 500;
+
+async function get(url, init = {}) {
+  for (let attempt = 0; ; attempt++) {
+    let r;
+    try {
+      r = await fetch(url, { ...init, headers: { ...UA, ...(init.headers || {}) } });
+    } catch (e) {
+      if (attempt >= RETRY.delays.length) throw e;
+    }
+    if (r?.ok) return r;
+    if (r && (!transient(r.status) || attempt >= RETRY.delays.length)) {
+      throw new Error(`${r.status} ${url}`);
+    }
+    await new Promise((res) => setTimeout(res, RETRY.delays[attempt]));
+  }
 }
+
+const j = async (url, init) => (await get(url, init)).json();
 
 // Decode the handful of HTML entities that show up in job titles (iCIMS emits
 // &amp;, &#39;, &#x27; ...). Not a full decoder -- just what a title needs.
@@ -28,16 +51,6 @@ const entities = (s) =>
     .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n))
     .replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">")
     .replace(/&#39;/g, "'");
-
-// Descriptions come back as HTML nearly everywhere. We only ever regex it, so
-// flatten to text once, here.
-const strip = (h) =>
-  String(h || "")
-    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;|&amp;|&lt;|&gt;|&quot;|&#\d+;/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
 
 export const ADAPTERS = {
   // ---------- tier 1: public ATS APIs ----------
@@ -52,26 +65,19 @@ export const ADAPTERS = {
     }));
   },
 
-  // Lever hands us the description in the LIST response, so it is free. The
-  // requirements usually live in `lists` ("Requirements", "What we look for"),
-  // not in the prose -- which is exactly where the years-of-experience line is.
   async lever(c) {
     const d = await j(`https://api.lever.co/v0/postings/${c.slug}?mode=json`);
     return (d || []).map((x) => ({
       id: String(x.id), title: x.text,
       location: x.categories?.location || "", url: x.hostedUrl,
-      description: [x.descriptionPlain || "", ...(x.lists || []).map((l) => `${l.text} ${strip(l.content)}`)]
-        .join(" ").trim(),
     }));
   },
 
-  // Ashby's board payload carries descriptionPlain too -- also free.
   async ashby(c) {
     const d = await j(`https://api.ashbyhq.com/posting-api/job-board/${c.slug}`);
     return (d.jobs || []).map((x) => ({
       id: String(x.id), title: x.title,
       location: x.location || "", url: x.jobUrl,
-      description: x.descriptionPlain || strip(x.descriptionHtml),
     }));
   },
 
@@ -102,8 +108,6 @@ export const ADAPTERS = {
       // Apply-URL path is usually /en-US/{site}, but *.myworkdaysite.com tenants
       // (e.g. Chewy) use /en-US/recruiting/{tenant}/{site}. c.applyPath overrides.
       url: `https://${c.host}${c.applyPath ?? `/en-US/${c.site}`}${x.externalPath}`,
-      // Kept for the lazy describer below -- the detail endpoint hangs off it.
-      path: x.externalPath,
     }));
   },
 
@@ -367,51 +371,44 @@ export const ADAPTERS = {
     return out;
   },
 
-  // ---------- coverage net ----------
-  // Not a company — a firehose. The SimplifyJobs new-grad repo regenerates
-  // every ~30 min and covers hundreds of employers. Slower than direct polling
-  // and it will never be first, but it catches the company you never thought to
-  // put on your list. That's the whole point: your list is the coverage gap.
-  async aggregator(c) {
-    const d = await j("https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json");
-    return (d || [])
-      .filter((x) => x.active !== false && x.is_visible !== false)
-      .slice(0, 400)
-      .map((x) => ({
-        id: String(x.id),
-        title: `${x.company_name} — ${x.title}`,
-        location: (x.locations || []).join(", "),
-        url: x.url,
-      }));
+  // LinkedIn. No external ATS -- LinkedIn hires through linkedin.com/jobs itself
+  // (careers.linkedin.com links there, filtered to its own company ids). This is
+  // the logged-out "guest" search the public jobs page calls: HTML cards, 10 per
+  // page, newest first (sortBy=DD). Lever has a `linkedin` board, but it is a QA
+  // sandbox ("Rug Maker", "RF_TEST_BUG_BASH") -- don't let sync pick it.
+  async linkedin(c) {
+    const out = [];
+    const seen = new Set();
+    for (let p = 0; p < (c.pages ?? 3); p++) {
+      const u = new URL("https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search");
+      u.searchParams.set("keywords", c.query ?? "software engineer");
+      u.searchParams.set("f_C", c.companyIds);
+      u.searchParams.set("location", "United States");
+      u.searchParams.set("sortBy", "DD");
+      u.searchParams.set("start", String(p * 10));
+      const html = await (await get(u.toString())).text();
+      const cards = html.split("<li>").slice(1);
+      for (const card of cards) {
+        const id = card.match(/urn:li:jobPosting:(\d+)/)?.[1];
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        const pick = (cls) => card.match(new RegExp(`${cls}[^>]*>([\\s\\S]*?)<`))?.[1].trim() || "";
+        out.push({
+          id,
+          title: entities(pick("base-search-card__title")),
+          location: entities(pick("job-search-card__location")),
+          url: `https://www.linkedin.com/jobs/view/${id}/`,
+        });
+      }
+      if (cards.length < 10) break;   // last page
+    }
+    return out;
   },
 
-  // ---------- coverage net #2: off-season internships ----------
-  // The firehose above is full-time NEW-GRAD only. This is the same idea for the
-  // INTERNSHIP track. SimplifyJobs' internship repo -- despite the "Summer" name
-  // -- carries every term in a structured `terms` field, so we keep only the
-  // off-season terms a May-2027 grad can actually take and drop summer + past
-  // ones right here. The kept term is folded into the title because the
-  // classifier scores the TITLE (see screen() in classify.js), not this feed's
-  // fields; that also means every row resolves on a regex, with zero LLM calls.
-  //
-  // MAINTENANCE: bump the repo URL and WANT set each cycle. Right now a May-2027
-  // grad's off-season = Fall 2026 / Winter 2026-27 / Spring 2027, all present in
-  // the Summer2026 repo. When SimplifyJobs rolls to a Summer2027 repo, point here.
-  async internships(c) {
-    const WANT = new Set(["Fall 2026", "Winter 2026", "Winter 2027", "Spring 2027"]);
-    const d = await j("https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/.github/scripts/listings.json");
-    return (d || [])
-      .filter((x) => x.active !== false && x.is_visible !== false)
-      .filter((x) => (x.terms || []).some((t) => WANT.has(t)))
-      .sort((a, b) => (b.date_updated || 0) - (a.date_updated || 0))
-      .slice(0, 500)
-      .map((x) => ({
-        id: String(x.id),
-        title: `${x.company_name} — ${x.title} (${(x.terms || []).filter((t) => WANT.has(t)).join(", ")})`,
-        location: (x.locations || []).join(", "),
-        url: x.url,
-      }));
-  },
+  // (The two SimplifyJobs firehoses that used to live here -- `aggregator` for
+  // new-grad and `internships` for off-season terms -- were removed on request.
+  // Only companies on companies.txt are polled now. Don't re-add a coverage net
+  // without asking: "only companies that are listed" was the explicit ask.)
 
   // ---------- tier 3: generic HTML diff ----------
   // For portals with no capturable JSON. Pulls hrefs matching a pattern out of
@@ -446,41 +443,14 @@ export async function fetchCompany(c) {
   return f(c);
 }
 
-// ---------- job descriptions ----------
-// A title like "Software Engineer" cannot tell you whether a role wants a new
-// grad or five years of non-internship experience -- that line lives in the
-// description. So we fetch it. But ONLY for the jobs whose title genuinely
-// can't decide (classify.js calls this exactly there): a "Senior Staff" or a
-// "New Grad SWE" title is already settled and costs nothing extra.
+// ---------- job descriptions: GONE ----------
+// There used to be a lazy describe() here (Greenhouse + Workday detail fetches,
+// lever/ashby's free payload) feeding an experience gate and an LLM call. Both
+// existed for ONE bucket: a title the regexes couldn't judge, which in practice
+// meant a seasonless "Software Engineer Intern". With internships dropped and
+// new grad a title allowlist, nothing is ambiguous -- so the poll now decides on
+// titles alone, makes no per-job detail requests, and costs no LLM tokens.
 //
-// That keeps this to a handful of requests per tick instead of one per job --
-// and note Greenhouse's list endpoint DOES take ?content=true, which would give
-// us every description in one call and looks tempting. It returns ~7MB for a
-// single large board. Per poll. Don't.
-const DESCRIBERS = {
-  async greenhouse(c, job) {
-    const d = await j(`https://boards-api.greenhouse.io/v1/boards/${c.slug}/jobs/${job.id}`);
-    return strip(d.content);
-  },
-
-  async workday(c, job) {
-    if (!job.path) return "";
-    const d = await j(`https://${c.host}/wday/cxs/${c.tenant}/${c.site}${job.path}`);
-    return strip(d.jobPostingInfo?.jobDescription);
-  },
-};
-
-// Returns the description text, or "" if we can't get one. An adapter with no
-// describer (and the aggregator, which has no description at all) returns "" --
-// and "" means the experience gate abstains, so the poll behaves exactly as it
-// did before. Never let a missing description drop a real job, or break a poll.
-export async function describe(c, job) {
-  if (job.description) return job.description;   // lever, ashby: already in the payload
-  const f = DESCRIBERS[c.adapter];
-  if (!f) return "";
-  try {
-    return await f(c, job);
-  } catch {
-    return "";
-  }
-}
+// If you ever need it back: Greenhouse's list endpoint takes ?content=true,
+// which looks like it would hand you every description in one call. It returns
+// ~7MB for a single large board. Per poll. Don't.
