@@ -401,3 +401,38 @@ test("one company breaking does not stop the others being polled", async () => {
   assert.equal(results.length, 2);
   assert.ok(results.every((r) => r.error), "both should report an error, neither should throw");
 });
+
+test("an everyMin:15 board is polled only on every third 5-min tick; others every tick", async () => {
+  const two = [
+    { name: "TestCo", adapter: "greenhouse", slug: "testco" },
+    { name: "Slow", adapter: "greenhouse", slug: "slow", everyMin: 15 },
+  ];
+  board = [job(1, "Software Engineer, New Grad 2027")];
+  const tick = (min) => Date.UTC(2026, 10, 18, 12, min);
+  const polled = async (min) => (await runAll(env, two, tick(min))).map((r) => r.company);
+
+  assert.deepEqual(await polled(0), ["TestCo", "Slow"]);
+  assert.deepEqual(await polled(5), ["TestCo"]);
+  assert.deepEqual(await polled(10), ["TestCo"]);
+  assert.deepEqual(await polled(15), ["TestCo", "Slow"]);
+  // No tick time (manual /run) polls everything.
+  assert.deepEqual((await runAll(env, two)).map((r) => r.company), ["TestCo", "Slow"]);
+});
+
+test("LinkedIn: a 429 on a later page keeps page-1 results instead of failing the poll", async () => {
+  const realFetch = globalThis.fetch;
+  const card = (id, t) =>
+    `<li><div data-entity-urn="urn:li:jobPosting:${id}"><h3 class="base-search-card__title">${t}</h3>` +
+    `<span class="job-search-card__location">Sunnyvale, CA</span></div></li>`;
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (!u.includes("linkedin.com")) return realFetch(url, init);
+    if (new URL(u).searchParams.get("start") !== "0") return new Response("slow down", { status: 429 });
+    return new Response(Array.from({ length: 10 }, (_, i) => card(100 + i, "Software Engineer")).join(""));
+  };
+  const li = [{ name: "LinkedIn", adapter: "linkedin", companyIds: "1337", pages: 3 }];
+  const [r] = await runAll(env, li);
+  assert.equal(r.error, undefined);
+  assert.equal(r.total, 10);
+  globalThis.fetch = realFetch;
+});

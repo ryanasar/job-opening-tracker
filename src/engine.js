@@ -25,7 +25,7 @@ import { renderDashboard, logApplied, handleApi } from "./dashboard.js";
 // The bound is politeness to the ATS endpoints, not CPU.
 const POLL_CONCURRENCY = 6;
 
-const BREAK_ALERT_AFTER = 6;   // ~30 min of consecutive failures at a 5-min cadence
+const BREAK_ALERT_AFTER = 6;   // consecutive failed POLLS: ~30 min at 5-min cadence, 90 min for an everyMin:15 board
 const DIGEST_CRON = "0 13 * * *";  // 8am Central
 
 // Telegram has exactly two tiers: sound, or silent-with-notification (still shows
@@ -161,7 +161,15 @@ export function createEngine(profile) {
     return out;
   }
 
-  async function runAll(env, companies = COMPANIES) {
+  // Per-company throttle for boards that rate-limit hard (LinkedIn 429s after a
+  // handful of requests). `everyMin: 15` polls that company only on ticks whose
+  // 5-min slot is a multiple of 15. Stateless -- derived from the tick time, so
+  // it costs no KV writes. `now` omitted (manual /run, tests) = poll everything.
+  const due = (c, now) =>
+    !c.everyMin || now == null || Math.floor(now / 300000) % Math.round(c.everyMin / 5) === 0;
+
+  async function runAll(env, companies = COMPANIES, now) {
+    companies = companies.filter((c) => due(c, now));
     const results = await pool(companies, POLL_CONCURRENCY, (c) => checkCompany(env, c));
 
     // Feed the daily digest: every non-"no" title seen this tick, so a bad
@@ -197,7 +205,7 @@ export function createEngine(profile) {
   const handler = {
     async scheduled(event, env, ctx) {
       if (event.cron === DIGEST_CRON) return ctx.waitUntil(digest(env));
-      ctx.waitUntil(runAll(env));
+      ctx.waitUntil(runAll(env, COMPANIES, event.scheduledTime));
     },
 
     async fetch(req, env) {

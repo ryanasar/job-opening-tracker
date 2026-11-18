@@ -376,17 +376,28 @@ export const ADAPTERS = {
   // the logged-out "guest" search the public jobs page calls: HTML cards, 10 per
   // page, newest first (sortBy=DD). Lever has a `linkedin` board, but it is a QA
   // sandbox ("Rug Maker", "RF_TEST_BUG_BASH") -- don't let sync pick it.
+  // RATE LIMIT: the guest API 429s after ~5 quick requests, worse from Cloudflare
+  // egress. 3 pages every 5 min tripped the broken alert repeatedly, so the
+  // override polls 1 page (newest-first -- new postings land there) every 15 min.
   async linkedin(c) {
     const out = [];
     const seen = new Set();
-    for (let p = 0; p < (c.pages ?? 3); p++) {
+    for (let p = 0; p < (c.pages ?? 1); p++) {
       const u = new URL("https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search");
       u.searchParams.set("keywords", c.query ?? "software engineer");
       u.searchParams.set("f_C", c.companyIds);
       u.searchParams.set("location", "United States");
       u.searchParams.set("sortBy", "DD");
       u.searchParams.set("start", String(p * 10));
-      const html = await (await get(u.toString())).text();
+      let html;
+      try {
+        html = await (await get(u.toString())).text();
+      } catch (e) {
+        // Rate-limited on a later page: keep what page 1 gave us rather than
+        // failing the whole poll. Page 1 failing is still a real failure.
+        if (out.length) break;
+        throw e;
+      }
       const cards = html.split("<li>").slice(1);
       for (const card of cards) {
         const id = card.match(/urn:li:jobPosting:(\d+)/)?.[1];
